@@ -24,6 +24,7 @@ const MQTT_URL = "wss://bemfa.com:9504/wss";
 const TOPIC_STATUS = "fire0status";
 const TOPIC_ZONE = "fire0zone";
 const TOPIC_VALUE = "fire0value";
+const TOPIC_DEVICE = "fire0device";
 const TOPIC_LEGACY_ALARM = "zhaohuo";
 const TOPIC_LEGACY_ZONE = "dizhi";
 const TOPIC_SET_ZONE = "quyu";
@@ -322,11 +323,13 @@ function OwlHero({ connected }) {
 
 export default function App() {
   const clientRef = useRef(null);
+  const syncTimerRef = useRef(null);
 
   const [connected, setConnected] = useState(false);
   const [zone, setZone] = useState("未绑定区域");
   const [status, setStatus] = useState("SAFE");
   const [value, setValue] = useState("F1=1,F2=1,SMK=0");
+  const [deviceId, setDeviceId] = useState("HHD001");
   const [legacyAlarm, setLegacyAlarm] = useState("0");
   const [legacyZone, setLegacyZone] = useState("未绑定区域#");
 
@@ -345,6 +348,7 @@ export default function App() {
         setFormData(merged);
         setSavedBinding(merged);
         setZoneInput(merged.room || "客厅");
+        if (merged.deviceId) setDeviceId(merged.deviceId);
       }
     } catch (error) {
       console.error("读取本地绑定信息失败:", error);
@@ -353,7 +357,7 @@ export default function App() {
 
   useEffect(() => {
     const client = mqtt.connect(MQTT_URL, {
-      clientId: UID,
+      clientId: `web_user_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
       clean: true,
       reconnectPeriod: 1500,
       connectTimeout: 10000,
@@ -367,6 +371,7 @@ export default function App() {
       console.log("MQTT 已连接");
 
       [
+        TOPIC_DEVICE,
         TOPIC_STATUS,
         TOPIC_ZONE,
         TOPIC_VALUE,
@@ -395,10 +400,26 @@ export default function App() {
     client.on("message", (topic, payload) => {
       const msg = payload.toString().trim();
 
-      if (topic === TOPIC_STATUS) setStatus(msg);
-      if (topic === TOPIC_ZONE && msg) setZone(msg);
-      if (topic === TOPIC_VALUE) setValue(msg);
-      if (topic === TOPIC_LEGACY_ALARM) setLegacyAlarm(msg);
+      if (topic === TOPIC_DEVICE && msg) {
+        setDeviceId(msg);
+      }
+
+      if (topic === TOPIC_STATUS) {
+        setStatus(msg);
+      }
+
+      if (topic === TOPIC_ZONE && msg) {
+        setZone(msg);
+      }
+
+      if (topic === TOPIC_VALUE) {
+        setValue(msg);
+      }
+
+      if (topic === TOPIC_LEGACY_ALARM) {
+        setLegacyAlarm(msg);
+      }
+
       if (topic === TOPIC_LEGACY_ZONE) {
         setLegacyZone(msg);
         const normalized = msg.endsWith("#") ? msg.slice(0, -1) : msg;
@@ -408,9 +429,21 @@ export default function App() {
 
     return () => {
       clientRef.current = null;
+      if (syncTimerRef.current) {
+        clearTimeout(syncTimerRef.current);
+      }
       client.end(true);
     };
   }, []);
+
+  const currentDeviceId = useMemo(() => {
+    return (
+      savedBinding.deviceId ||
+      formData.deviceId ||
+      deviceId ||
+      "HHD001"
+    ).trim();
+  }, [savedBinding.deviceId, formData.deviceId, deviceId]);
 
   const statusText = useMemo(() => {
     if (status === "SAFE") return "安全守护中";
@@ -476,6 +509,76 @@ export default function App() {
     }));
   };
 
+  const syncRuntimeToFirebase = useMemo(() => {
+    return async (override = {}) => {
+      try {
+        const targetDeviceId = (override.deviceId || currentDeviceId).trim();
+        if (!targetDeviceId) return;
+
+        const payload = {
+          deviceId: targetDeviceId,
+          ownerName: savedBinding.ownerName || "",
+          phone: savedBinding.phone || "",
+          address: savedBinding.address || "",
+          room: savedBinding.room || "",
+          status: override.status ?? status,
+          statusText: override.statusText ?? statusText,
+          zone: override.zone ?? zone,
+          value: override.value ?? value,
+          legacyAlarm: override.legacyAlarm ?? legacyAlarm,
+          legacyZone: override.legacyZone ?? legacyZone,
+          source: "app-runtime",
+          updatedAt: new Date().toISOString(),
+        };
+
+        await setDoc(doc(db, "devices", targetDeviceId), payload, {
+          merge: true,
+        });
+      } catch (error) {
+        console.error("运行态同步 Firebase 失败：", error);
+      }
+    };
+  }, [
+    currentDeviceId,
+    savedBinding.ownerName,
+    savedBinding.phone,
+    savedBinding.address,
+    savedBinding.room,
+    status,
+    statusText,
+    zone,
+    value,
+    legacyAlarm,
+    legacyZone,
+  ]);
+
+  useEffect(() => {
+    if (!currentDeviceId) return;
+
+    if (syncTimerRef.current) {
+      clearTimeout(syncTimerRef.current);
+    }
+
+    syncTimerRef.current = setTimeout(() => {
+      syncRuntimeToFirebase();
+    }, 300);
+
+    return () => {
+      if (syncTimerRef.current) {
+        clearTimeout(syncTimerRef.current);
+      }
+    };
+  }, [
+    currentDeviceId,
+    status,
+    statusText,
+    zone,
+    value,
+    legacyAlarm,
+    legacyZone,
+    syncRuntimeToFirebase,
+  ]);
+
   const saveBindingInfo = async () => {
     try {
       if (!formData.deviceId.trim()) {
@@ -512,16 +615,28 @@ export default function App() {
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(formData));
 
-      await setDoc(doc(db, "devices", formData.deviceId), {
-        deviceId: formData.deviceId,
-        ownerName: formData.ownerName,
-        phone: formData.phone,
-        address: formData.address,
-        room: formData.room,
-        updatedAt: new Date().toISOString(),
-      });
+      await setDoc(
+        doc(db, "devices", formData.deviceId),
+        {
+          deviceId: formData.deviceId,
+          ownerName: formData.ownerName,
+          phone: formData.phone,
+          address: formData.address,
+          room: formData.room,
+          status,
+          statusText,
+          zone,
+          value,
+          legacyAlarm,
+          legacyZone,
+          source: "app-binding",
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true },
+      );
 
       setSavedBinding({ ...formData });
+      setDeviceId(formData.deviceId);
       setZoneInput(formData.room || "客厅");
       setSaveMessage("守护者绑定成功，家庭信息已保存到云端");
       setTimeout(() => setSaveMessage(""), 2500);
@@ -539,6 +654,7 @@ export default function App() {
     setFormData({ ...DEFAULT_BINDING });
     setSavedBinding({ ...DEFAULT_BINDING });
     setZoneInput("客厅");
+    setDeviceId("HHD001");
     setSaveMessage("本地绑定信息已清空");
     setTimeout(() => setSaveMessage(""), 2000);
   };
@@ -558,8 +674,6 @@ export default function App() {
       return;
     }
 
-    console.log("准备发送区域:", finalText, "主题:", TOPIC_SET_ZONE);
-
     clientRef.current.publish(
       TOPIC_SET_ZONE,
       finalText,
@@ -572,7 +686,6 @@ export default function App() {
           return;
         }
 
-        console.log("区域发送成功:", finalText);
         setZoneInput(finalText);
         setSaveMessage(`区域已发送：${finalText}`);
         setTimeout(() => setSaveMessage(""), 2000);

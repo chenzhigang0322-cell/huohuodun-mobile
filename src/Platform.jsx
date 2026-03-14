@@ -1,34 +1,22 @@
 import React, { useEffect, useMemo, useState } from "react";
-import mqtt from "mqtt";
 import {
   Shield,
   Wifi,
-  WifiOff,
   MapPin,
   User,
   AlertTriangle,
-  Home,
   Bell,
-  Cpu,
-  Phone,
-  Siren,
   Activity,
   Radio,
   Flame,
   Building2,
   Map,
   TowerControl,
+  Cpu,
+  Siren,
 } from "lucide-react";
 import { doc, onSnapshot } from "firebase/firestore";
 import { db } from "./firebase";
-
-const UID = "7b5f486ef57548e8a6fb63381663c002";
-const MQTT_URL = "wss://bemfa.com:9504/wss";
-
-const TOPIC_DEVICE = "fire0device";
-const TOPIC_STATUS = "fire0status";
-const TOPIC_ZONE = "fire0zone";
-const TOPIC_VALUE = "fire0value";
 
 function Panel({ title, icon, children, accent = "#38bdf8", style = {} }) {
   return (
@@ -119,25 +107,23 @@ function MetricCard({ label, value, color = "#38bdf8", sub = "" }) {
 }
 
 export default function Platform() {
-  const [connected, setConnected] = useState(false);
-  const [deviceId, setDeviceId] = useState("HHD001");
-  const [status, setStatus] = useState("SAFE");
-  const [zone, setZone] = useState("未绑定区域");
-  const [value, setValue] = useState("F1=1,F2=1,SMK=0");
-  const [logs, setLogs] = useState([]);
+  const [connected, setConnected] = useState(true);
+  const [nowText, setNowText] = useState("");
+
   const [deviceInfo, setDeviceInfo] = useState({
+    deviceId: "HHD001",
     ownerName: "未登记",
     phone: "未登记",
     address: "未登记",
     room: "未登记",
+    status: "SAFE",
+    statusText: "安全守护中",
+    zone: "未绑定区域",
+    value: "F1=1,F2=1,SMK=0",
+    updatedAt: "",
   });
-  const [nowText, setNowText] = useState("");
 
-  const pushLog = (text) => {
-    setLogs((prev) =>
-      [`${new Date().toLocaleTimeString()}  ${text}`, ...prev].slice(0, 18),
-    );
-  };
+  const [logs, setLogs] = useState([]);
 
   useEffect(() => {
     const updateTime = () => {
@@ -153,105 +139,78 @@ export default function Platform() {
         }),
       );
     };
+
     updateTime();
     const timer = setInterval(updateTime, 1000);
     return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
-    const client = mqtt.connect(MQTT_URL, {
-      clientId: UID,
-      clean: true,
-      reconnectPeriod: 1500,
-      connectTimeout: 10000,
-      protocolVersion: 4,
-    });
-
-    client.on("connect", () => {
-      setConnected(true);
-      pushLog("平台 MQTT 已连接");
-
-      [TOPIC_DEVICE, TOPIC_STATUS, TOPIC_ZONE, TOPIC_VALUE].forEach((topic) => {
-        client.subscribe(topic, { qos: 0 }, (err) => {
-          pushLog(err ? `订阅失败: ${topic}` : `订阅成功: ${topic}`);
-        });
-      });
-    });
-
-    client.on("reconnect", () => {
-      pushLog("平台正在重连 MQTT...");
-    });
-
-    client.on("close", () => {
-      setConnected(false);
-      pushLog("平台 MQTT 已断开");
-    });
-
-    client.on("error", (err) => {
-      pushLog(`平台连接错误: ${err.message}`);
-    });
-
-    client.on("message", (topic, payload) => {
-      const msg = payload.toString().trim();
-      pushLog(`收到 ${topic}: ${msg}`);
-
-      if (topic === TOPIC_DEVICE && msg) setDeviceId(msg);
-      if (topic === TOPIC_STATUS) setStatus(msg);
-      if (topic === TOPIC_ZONE && msg) setZone(msg);
-      if (topic === TOPIC_VALUE) setValue(msg);
-    });
-
-    return () => {
-      client.end(true);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!deviceId) return;
-
-    pushLog(`开始监听 Firestore: ${deviceId}`);
-
     const unsub = onSnapshot(
-      doc(db, "devices", deviceId),
+      doc(db, "devices", "HHD001"),
       (snap) => {
-        if (snap.exists()) {
-          const data = snap.data();
-          setDeviceInfo({
-            ownerName: data.ownerName || "未登记",
-            phone: data.phone || "未登记",
-            address: data.address || "未登记",
-            room: data.room || "未登记",
-          });
-          pushLog(`已同步绑定信息: ${deviceId}`);
-        } else {
-          setDeviceInfo({
-            ownerName: "未登记",
-            phone: "未登记",
-            address: "未登记",
-            room: "未登记",
-          });
-          pushLog(`未找到绑定信息: ${deviceId}`);
+        if (!snap.exists()) {
+          setConnected(false);
+          return;
         }
+
+        const data = snap.data();
+        setConnected(true);
+
+        setDeviceInfo({
+          deviceId: data.deviceId || "HHD001",
+          ownerName: data.ownerName || "未登记",
+          phone: data.phone || "未登记",
+          address: data.address || "未登记",
+          room: data.room || "未登记",
+          status: data.status || "SAFE",
+          statusText: data.statusText || "安全守护中",
+          zone: data.zone || "未绑定区域",
+          value: data.value || "F1=1,F2=1,SMK=0",
+          updatedAt: data.updatedAt || "",
+        });
+
+        setLogs((prev) => {
+          const nextLogs = [
+            `${new Date().toLocaleTimeString()}  已同步 Firebase：状态=${data.statusText || "安全守护中"}，区域=${data.zone || "未绑定区域"}`,
+            ...prev,
+          ];
+          return nextLogs.slice(0, 18);
+        });
       },
       (error) => {
-        console.error(error);
-        pushLog(`读取绑定信息失败: ${error.message}`);
+        console.error("平台读取 Firebase 失败：", error);
+        setConnected(false);
       },
     );
 
     return () => unsub();
-  }, [deviceId]);
+  }, []);
 
-  const statusText = useMemo(() => {
-    if (status === "SAFE") return "安全";
-    if (status === "FIRE") return "着火报警";
-    if (status === "GAS_LEAK") return "燃气泄漏";
-    if (status === "GAS_FIRE") return "燃气着火";
-    return "未知";
-  }, [status]);
+  const parsedMetrics = useMemo(() => {
+    const result = { F1: "-", F2: "-", SMK: "-" };
+    (deviceInfo.value || "").split(",").forEach((part) => {
+      const [k, v] = part.split("=");
+      if (k && v) result[k.trim()] = v.trim();
+    });
+    return result;
+  }, [deviceInfo.value]);
+
+  const districtTag = useMemo(() => {
+    const address = deviceInfo.address || "";
+    if (address.includes("长宁")) return "长宁区";
+    if (address.includes("浦东")) return "浦东新区";
+    if (address.includes("徐汇")) return "徐汇区";
+    if (address.includes("静安")) return "静安区";
+    if (address.includes("黄浦")) return "黄浦区";
+    return "上海市接入区域";
+  }, [deviceInfo.address]);
 
   const theme = useMemo(() => {
-    if (status === "SAFE") {
+    if (
+      deviceInfo.status === "SAFE" ||
+      deviceInfo.statusText === "安全守护中"
+    ) {
       return {
         main: "#22c55e",
         glow: "rgba(34,197,94,0.18)",
@@ -259,9 +218,10 @@ export default function Platform() {
         text: "#86efac",
         title: "当前全市重点警情：无高危事件",
         hint: "平台运行正常，当前接入家庭终端持续在线监测中",
+        statusLabel: "安全",
       };
     }
-    if (status === "FIRE") {
+    if (deviceInfo.status === "FIRE" || deviceInfo.statusText === "着火报警") {
       return {
         main: "#ef4444",
         glow: "rgba(239,68,68,0.20)",
@@ -269,9 +229,13 @@ export default function Platform() {
         text: "#fca5a5",
         title: "当前全市重点警情：家庭着火报警",
         hint: "平台已接收到重点火情，请指挥中心立即调度处置",
+        statusLabel: "着火报警",
       };
     }
-    if (status === "GAS_LEAK") {
+    if (
+      deviceInfo.status === "GAS_LEAK" ||
+      deviceInfo.statusText === "燃气泄漏"
+    ) {
       return {
         main: "#f59e0b",
         glow: "rgba(245,158,11,0.20)",
@@ -279,6 +243,7 @@ export default function Platform() {
         text: "#fcd34d",
         title: "当前全市重点警情：燃气泄漏预警",
         hint: "平台已接收到燃气泄漏预警，请尽快联系住户并核查",
+        statusLabel: "燃气泄漏",
       };
     }
     return {
@@ -288,32 +253,20 @@ export default function Platform() {
       text: "#fda4af",
       title: "当前全市重点警情：燃气着火高危事件",
       hint: "平台已接收到高危复合警情，请立即启动紧急处置流程",
+      statusLabel: deviceInfo.statusText || "高危警情",
     };
-  }, [status]);
+  }, [deviceInfo.status, deviceInfo.statusText]);
 
-  const parsedMetrics = useMemo(() => {
-    const result = { F1: "-", F2: "-", SMK: "-" };
-    value.split(",").forEach((part) => {
-      const [k, v] = part.split("=");
-      if (k && v) result[k.trim()] = v.trim();
-    });
-    return result;
-  }, [value]);
-
-  // 城市级演示数据
-  const cityStats = {
-    familyCount: "12,846",
-    onlineDevices: connected ? "12,103" : "11,982",
-    todayAlerts: status === "SAFE" ? "27" : "28",
-    handlingAlerts: status === "SAFE" ? "1" : "2",
-  };
-
-  const districtTag = useMemo(() => {
-    if (deviceInfo.address.includes("长宁")) return "长宁区";
-    if (deviceInfo.address.includes("浦东")) return "浦东新区";
-    if (deviceInfo.address.includes("徐汇")) return "徐汇区";
-    return "上海市接入区域";
-  }, [deviceInfo.address]);
+  const cityStats = useMemo(() => {
+    const handling = theme.statusLabel === "安全" ? "1" : "2";
+    const alerts = theme.statusLabel === "安全" ? "27" : "28";
+    return {
+      familyCount: "12,846",
+      onlineDevices: connected ? "12,103" : "11,982",
+      todayAlerts: alerts,
+      handlingAlerts: handling,
+    };
+  }, [connected, theme.statusLabel]);
 
   return (
     <div
@@ -394,7 +347,7 @@ export default function Platform() {
                 fontWeight: 700,
               }}
             >
-              {connected ? <Wifi size={18} /> : <WifiOff size={18} />}
+              <Wifi size={18} />
               {connected ? "平台在线" : "平台离线"}
             </div>
             <div style={{ fontSize: "14px", color: "#94a3b8" }}>{nowText}</div>
@@ -494,10 +447,14 @@ export default function Platform() {
               <div style={{ display: "grid", gap: "12px" }}>
                 <MetricCard
                   label="当前重点设备"
-                  value={deviceId}
+                  value={deviceInfo.deviceId}
                   color="#38bdf8"
                 />
-                <MetricCard label="警情所在区域" value={zone} color="#67e8f9" />
+                <MetricCard
+                  label="警情所在区域"
+                  value={deviceInfo.zone}
+                  color="#67e8f9"
+                />
                 <MetricCard
                   label="事件所在行政区"
                   value={districtTag}
@@ -543,9 +500,9 @@ export default function Platform() {
                   fontSize: "14px",
                 }}
               >
-                <div>• Firestore 已完成住户信息同步</div>
-                <div>• MQTT 正实时接收家庭终端报警</div>
-                <div>• 平台按设备编号自动关联住户地址</div>
+                <div>• 平台当前通过 Firebase 读取实时状态</div>
+                <div>• 手机端负责接收 MQTT 并同步到云端</div>
+                <div>• 地址与状态已统一写入 devices/HHD001</div>
                 <div>• 支持扩展消防员便携接警终端</div>
               </div>
             </Panel>
@@ -705,7 +662,7 @@ export default function Platform() {
                       color: "#f8fafc",
                     }}
                   >
-                    {statusText}
+                    {theme.statusLabel}
                   </div>
 
                   <div
@@ -718,8 +675,8 @@ export default function Platform() {
                     }}
                   >
                     <div>事件行政区：{districtTag}</div>
-                    <div>报警区域：{zone}</div>
-                    <div>设备编号：{deviceId}</div>
+                    <div>报警区域：{deviceInfo.zone}</div>
+                    <div>设备编号：{deviceInfo.deviceId}</div>
                     <div>住户地址：{deviceInfo.address}</div>
                   </div>
                 </div>
@@ -754,7 +711,7 @@ export default function Platform() {
                         color: "#f8fafc",
                       }}
                     >
-                      {deviceId}
+                      {deviceInfo.deviceId}
                     </div>
                   </div>
 
@@ -777,7 +734,7 @@ export default function Platform() {
                         color: "#f8fafc",
                       }}
                     >
-                      {zone}
+                      {deviceInfo.zone}
                     </div>
                   </div>
 
@@ -800,7 +757,7 @@ export default function Platform() {
                         color: theme.text,
                       }}
                     >
-                      {statusText}
+                      {theme.statusLabel}
                     </div>
                   </div>
                 </div>
@@ -842,7 +799,11 @@ export default function Platform() {
                       gap: "8px",
                     }}
                   >
-                    <DataRow label="设备编号" value={deviceId} important />
+                    <DataRow
+                      label="设备编号"
+                      value={deviceInfo.deviceId}
+                      important
+                    />
                     <DataRow
                       label="联系人"
                       value={deviceInfo.ownerName}
@@ -897,7 +858,7 @@ export default function Platform() {
                       wordBreak: "break-all",
                     }}
                   >
-                    {value}
+                    {deviceInfo.value}
                   </div>
                 </div>
 
@@ -952,7 +913,7 @@ export default function Platform() {
                 />
                 <MetricCard
                   label="当前警情"
-                  value={statusText}
+                  value={theme.statusLabel}
                   color={theme.main}
                 />
                 <MetricCard
