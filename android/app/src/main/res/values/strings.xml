@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">慧火盾</string>
+    <string name="title_activity_main">慧火盾</string>
+    <string name="package_name">com.huichuangma.huohuodun</string>
+    <string name="custom_url_scheme">com.huichuangma.huohuodun</string>
+</resources>
