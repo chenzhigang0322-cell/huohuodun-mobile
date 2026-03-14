@@ -582,8 +582,11 @@ export default function App() {
           zone: finalText,
           legacyZone: finalLegacyZone,
           room: savedBinding.room || formData.room || finalText,
+
+          // 这两个字段是给 ESP32 指令轮询用的
           zoneCommand: finalText,
           zoneCommandUpdatedAt: new Date().toISOString(),
+
           updatedAt: new Date().toISOString(),
           source: "app-zone-command",
         },
